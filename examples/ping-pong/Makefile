@@ -6,8 +6,8 @@ BUILD_DIR = $(CURDIR)/build
 LIB_DIR = $(BUILD_DIR)/debug
 
 INCS = -I$(INCLUDE_DIR)
-CFLAGS = -I. -Wall -Werror -pedantic -fsanitize=address -g
-
+CFLAGS = -I.  -Werror -fsanitize=address -g
+#-pedantic -Wall
 ifeq ($(OS), Darwin)
 CFLAGS += -framework Security
 endif

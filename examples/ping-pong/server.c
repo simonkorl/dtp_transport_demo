@@ -43,14 +43,48 @@
 
 #include <quiche.h>
 
+
+
 #define LOCAL_CONN_ID_LEN 16
 
 #define MAX_DATAGRAM_SIZE 1350
-
+#define MAX_BLOCK_SIZE 65535*10
 #define MAX_TOKEN_LEN                                                          \
   sizeof("quiche") - 1 + sizeof(struct sockaddr_storage) +                     \
       QUICHE_MAX_CONN_ID_LEN
 
+//-----------------------------
+#define DEBUG 1
+#if DEBUG
+#define WZX_DEBUG(format, args...)                                            \
+    do {                                                                      \
+        fprintf(stderr, "GG-->>> %s->%s()->line.%d : " format "\n", __FILE__, \
+                __FUNCTION__, __LINE__, ##args);                              \
+    } while (0)
+#else
+#define WZX_DEBUG(format, args...) \
+    do {                           \
+    } while (0)
+#endif
+#define MAX_FILE_PATH_LEN 1024
+typedef struct cache_recv_streams_data {
+    uint64_t id;                    /* key */
+    char *value;
+    uint64_t value_len;
+    UT_hash_handle hh;         /* makes this structure hashable */
+}STREAMS_DATA;
+
+STREAMS_DATA *cache_streams_data_table = NULL;
+
+void add_stream_data_to_table(int mykey, char *value,int value_len);
+STREAMS_DATA *find_stream_data_by_streamid(int mykey);
+void delete_cache_stream_data(STREAMS_DATA *user);
+void delete_all_cache_stream_data();
+void print_all_chahe_stream_data();
+void print_all_chahe_stream_id();
+void sort_streams_datas_by_streamid();
+void save_recv_data_to_file();
+//-----------------------------
 struct connections {
   int sock;
 
@@ -194,7 +228,7 @@ static struct conn_io *create_conn(uint8_t *odcid, size_t odcid_len) {
 static void recv_cb(EV_P_ ev_io *w, int revents) {
   struct conn_io *tmp, *conn_io = NULL;
 
-  static uint8_t buf[65535];
+  static uint8_t buf[MAX_BLOCK_SIZE];
   static uint8_t out[MAX_DATAGRAM_SIZE];
 
   while (1) {
@@ -311,42 +345,50 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
       continue;
     }
 
-    fprintf(stderr, "recv %zd bytes\n", done);
+    //fprintf(stderr, "recv %zd bytes\n", done);
 
     if (quiche_conn_is_established(conn_io->conn)) {
       uint64_t s = 0;
 
       quiche_stream_iter *readable = quiche_conn_readable(conn_io->conn);
+uint64_t block_buf[MAX_BLOCK_SIZE] = {0};
+uint64_t block_priority = 0;
+uint64_t block_deadline = 0;
 
       while (quiche_stream_iter_next(readable, &s)) {
-        fprintf(stderr, "stream %" PRIu64 " is readable\n", s);
+        //printf("stream %" PRIu64 " is readable\n", s);
 
         bool fin = false;
-        ssize_t recv_len =
-            quiche_conn_stream_recv(conn_io->conn, s, buf, sizeof(buf), &fin);
+        ssize_t recv_len =quiche_conn_stream_recv(conn_io->conn, s, buf, sizeof(buf), &fin);
         if (recv_len < 0) {
           break;
         }
-
-        printf("recv: %.*s", (int)recv_len, buf);
-
+        add_stream_data_to_table(s,buf,recv_len);
         if (fin) {
-          static const char *resp = "byez\n";
-          quiche_conn_stream_send(conn_io->conn, s, (uint8_t *)resp, 5, true);
-          printf("send: %s", resp);
+          //static const char *resp = "byez\n";
+          //WZX_DEBUG("END------>fin %ld\n",s);
+          //quiche_conn_stream_send(conn_io->conn, s, (uint8_t *)resp, 5, true);
+          //printf("send: %s", resp);
         }
       }
 
       quiche_stream_iter_free(readable);
-    }
+
+    } 
+
+    
   }
+
+
 
   HASH_ITER(hh, conns->h, conn_io, tmp) {
     flush_egress(loop, conn_io);
 
     if (quiche_conn_is_closed(conn_io->conn)) {
+WZX_DEBUG("CLOSE------>");
       quiche_stats stats;
 
+ 
       quiche_conn_stats(conn_io->conn, &stats);
       fprintf(stderr,
               "connection closed, recv=%zu sent=%zu lost=%zu rtt=%" PRIu64
@@ -380,7 +422,11 @@ static void timeout_cb(EV_P_ ev_timer *w, int revents) {
             stats.recv, stats.sent, stats.lost, stats.rtt, stats.cwnd);
 
     HASH_DELETE(hh, conns->h, conn_io);
-
+ //存储到文件
+        sort_streams_datas_by_streamid();
+        save_recv_data_to_file();
+        delete_all_cache_stream_data();
+    printf("recv success!\n");
     ev_timer_stop(loop, &conn_io->timer);
     quiche_conn_free(conn_io->conn);
     free(conn_io);
@@ -463,3 +509,110 @@ int main(int argc, char *argv[]) {
 
   return 0;
 }
+
+//
+void add_stream_data_to_table(int mykey, char *value,int value_len) {  
+  if(value == NULL)
+  {
+    printf("input error \n");
+    return;
+  }
+    STREAMS_DATA *s;  
+    HASH_FIND_INT(cache_streams_data_table, &mykey, s);  /* mykey already in the hash? */  
+    if (s==NULL) {  
+      //printf("key --->%d don't exit\n",mykey);
+      s = (STREAMS_DATA*)malloc(sizeof(STREAMS_DATA));  
+      if(s == NULL){
+        printf("calloc error s add_stream_data_to_table\n");
+      }
+      s->id = mykey; 
+      s->value = (char *)calloc(1,MAX_BLOCK_SIZE+1); 
+      if(s->value == NULL)
+      {
+          printf("calloc error int add_stream_data_to_table\n");
+
+      }
+      s->value_len = value_len;
+      if(s->value == NULL){
+        printf("calloc error int add_stream_data_to_table\n");
+      } 
+      HASH_ADD_INT( cache_streams_data_table, id, s );  /* id: name of key field */   
+      memcpy(s->value,value,value_len);
+    }else{
+      sprintf(s->value,"%s%.*s",s->value,value_len,value);
+      s->value_len+=value_len;
+    }
+}  
+
+STREAMS_DATA *find_stream_data_by_streamid(int mykey) {  
+    STREAMS_DATA *s;  
+    HASH_FIND_INT( cache_streams_data_table, &mykey, s );  /* s: output pointer */  
+    return s;  
+}  
+  
+void delete_cache_stream_data(STREAMS_DATA *user) {  
+    HASH_DEL( cache_streams_data_table, user);  /* user: pointer to deletee */  
+    free(user->value);
+    free(user);  
+}   
+
+void delete_all_cache_stream_data() {  
+  STREAMS_DATA *current_user, *tmp;  
+  HASH_ITER(hh, cache_streams_data_table, current_user, tmp) {  
+    HASH_DEL(cache_streams_data_table,current_user);  /* delete it (users advances to next) */  
+    free(current_user);            /* free it */  
+  }  
+}  
+  
+void print_all_chahe_stream_data() {  
+    STREAMS_DATA *s;  
+  
+    for(s=cache_streams_data_table; s != NULL; s=(STREAMS_DATA*)(s->hh.next)) {  
+        printf("-->user id %ld: value %s\n", s->id, s->value);  
+    }  
+}  
+
+void print_all_chahe_stream_id() {  
+    STREAMS_DATA *s;  
+  
+    for(s=cache_streams_data_table; s != NULL; s=(STREAMS_DATA*)(s->hh.next)) {  
+        printf("-->user id %ld\n", s->id);  
+    }  
+}  
+int id_sort(STREAMS_DATA*a, STREAMS_DATA*b) {
+    return (a->id - b->id);
+}
+void sort_streams_datas_by_streamid() {  
+    HASH_SORT(cache_streams_data_table, id_sort);  
+}  
+
+
+
+
+void save_recv_data_to_file() {
+    
+    static bool get_file_path_flag = false;
+    FILE *fp = NULL;
+
+  STREAMS_DATA *s_temp = find_stream_data_by_streamid(0);
+  if(s_temp==NULL)
+  {
+    printf("0 stream not find\n");
+    return;
+  } 
+  
+  fp = fopen(s_temp->value, "a+");
+  if (fp == NULL) {
+      fprintf(stderr,"open %s file error\n","test_rest.txt");
+      return;
+  }
+      STREAMS_DATA *s;  
+
+  //print_all_chahe_stream_id();
+  for(s=(STREAMS_DATA*)cache_streams_data_table->hh.next; s != NULL; s=(STREAMS_DATA*)(s->hh.next)){
+        fwrite(s->value,(int)s->value_len,1,fp);
+      }
+    if(fp != NULL){
+      fclose(fp);
+    }
+} 
